@@ -411,11 +411,19 @@ export default function Acoustic3DScene({
       if (!container) return;
       const newWidth = container.clientWidth;
       const newHeight = container.clientHeight;
-      camera.aspect = newWidth / newHeight;
+      const aspect = newWidth / newHeight;
+      camera.aspect = aspect;
+      // On narrow mobile portrait screens, push camera slightly back so both devices remain in view
+      if (aspect < 1.3) {
+        camera.position.z = Math.min(18, 12 * (1.3 / Math.max(0.65, aspect)));
+      } else {
+        camera.position.z = 12;
+      }
       camera.updateProjectionMatrix();
       renderer.setSize(newWidth, newHeight);
     };
 
+    handleResize();
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(container);
 
@@ -435,62 +443,63 @@ export default function Acoustic3DScene({
   }, [showParticles, showWavefronts]);
 
   return (
-    <div className="relative w-full h-[380px] md:h-[440px] rounded-2xl overflow-hidden bg-[#141413] border border-stone-800 shadow-xl">
+    <div className="relative w-full h-[260px] sm:h-[340px] md:h-[420px] rounded-2xl overflow-hidden bg-[#141413] border border-stone-800 shadow-xl touch-none select-none">
       {/* Three.js Container */}
       <div ref={containerRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
 
       {/* 3D Scene HUD Overlay */}
-      <div className="absolute top-3 left-3 flex items-center gap-2 pointer-events-none">
-        <span className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#201f1c]/90 border border-stone-700/60 text-[11px] font-claude-mono tracking-wide text-stone-300 backdrop-blur-md">
-          <Sparkles size={12} className={active ? "animate-spin text-[#d97757]" : "text-stone-500"} />
-          3D Acoustic Field · {statusText}
+      <div className="absolute top-2.5 left-2.5 sm:top-3 sm:left-3 flex flex-wrap items-center gap-1.5 pointer-events-none max-w-[60%] sm:max-w-none">
+        <span className="flex items-center gap-1.5 px-2 sm:px-3 py-1 rounded-lg bg-[#201f1c]/90 border border-stone-700/60 text-[10px] sm:text-[11px] font-claude-mono tracking-wide text-stone-300 backdrop-blur-md">
+          <Sparkles size={11} className={active ? "animate-spin text-[#d97757]" : "text-stone-500"} />
+          <span className="hidden xs:inline">3D Field · </span>{statusText}
         </span>
         {active && (
-          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-950/80 border border-emerald-800/60 text-[11px] font-claude-mono text-emerald-300 backdrop-blur-md">
-            Bit {bit} · {(frequency / 1000).toFixed(2)} kHz
+          <span className="flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-950/85 border border-emerald-800/60 text-[10px] sm:text-[11px] font-claude-mono text-emerald-300 backdrop-blur-md">
+            Bit {bit} · {(frequency / 1000).toFixed(1)}kHz
           </span>
         )}
       </div>
 
       {/* Interactive Controls Overlay */}
-      <div className="absolute top-3 right-3 flex items-center gap-2">
+      <div className="absolute top-2.5 right-2.5 sm:top-3 sm:right-3 flex items-center gap-1 sm:gap-2">
         <button
           onClick={() => setShowParticles(!showParticles)}
-          className={`px-3 py-1 text-xs font-claude-mono rounded-lg border transition-all ${
+          className={`px-2 sm:px-3 py-1 text-[10px] sm:text-xs font-claude-mono rounded-lg border transition-all ${
             showParticles
               ? "bg-[#2b2a26] border-stone-600 text-[#f5efe6]"
-              : "bg-stone-900/60 border-stone-800 text-stone-500"
+              : "bg-stone-900/70 border-stone-800 text-stone-500"
           }`}
           title="Toggle Air Molecule Particles"
         >
-          Particles: {showParticles ? "On" : "Off"}
+          {showParticles ? "Particles" : "No Particles"}
         </button>
 
         <button
           onClick={() => setShowWavefronts(!showWavefronts)}
-          className={`px-3 py-1 text-xs font-claude-mono rounded-lg border transition-all ${
+          className={`px-2 sm:px-3 py-1 text-[10px] sm:text-xs font-claude-mono rounded-lg border transition-all ${
             showWavefronts
               ? "bg-[#2b2a26] border-stone-600 text-[#f5efe6]"
-              : "bg-stone-900/60 border-stone-800 text-stone-500"
+              : "bg-stone-900/70 border-stone-800 text-stone-500"
           }`}
           title="Toggle Acoustic Wavefront Rings"
         >
-          Waves: {showWavefronts ? "On" : "Off"}
+          {showWavefronts ? "Waves" : "No Waves"}
         </button>
       </div>
 
       {/* Bottom Telemetry Bar */}
-      <div className="absolute bottom-2 inset-x-3 flex items-center justify-between text-[11px] font-claude-mono text-stone-400 bg-[#1c1b18]/85 border border-stone-800 px-3.5 py-2 rounded-xl backdrop-blur-md pointer-events-none">
-        <div className="flex items-center gap-3">
+      <div className="absolute bottom-2 inset-x-2 sm:inset-x-3 flex items-center justify-between text-[10px] sm:text-[11px] font-claude-mono text-stone-400 bg-[#1c1b18]/90 border border-stone-800 px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl backdrop-blur-md pointer-events-none">
+        <div className="flex items-center gap-2 sm:gap-3">
           <span className="flex items-center gap-1 text-[#d97757]">
-            <Volume2 size={13} /> TX (Speaker)
+            <Volume2 size={12} /> TX (Speaker)
           </span>
-          <span className="text-stone-600">┈┈┈ 0.5m–2m Air Gap ┈┈┈</span>
+          <span className="hidden sm:inline text-stone-600">┈┈ 0.5–2m Air ┈┈</span>
+          <span className="sm:hidden text-stone-600">→</span>
           <span className="flex items-center gap-1 text-emerald-400">
-            <Mic size={13} /> RX (Microphone)
+            <Mic size={12} /> RX (Mic)
           </span>
         </div>
-        <div className="hidden sm:flex items-center gap-2 text-stone-500">
+        <div className="hidden md:flex items-center gap-2 text-stone-500">
           <span>Drag to orbit 360° · Scroll to zoom</span>
         </div>
       </div>

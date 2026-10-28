@@ -154,7 +154,7 @@ export async function transmitFrame(
   preparedContext?: AudioContext,
   onAnalyserReady?: (analyser: AnalyserNode) => void,
   symbolMs = DEFAULT_SYMBOL_MS
-): Promise<void> {
+): Promise<{ durationMs: number }> {
   const context = preparedContext ?? makeContext();
   try {
     if (context.state === "suspended") await context.resume();
@@ -271,6 +271,8 @@ export async function transmitFrame(
       };
       source.start();
     });
+
+    return { durationMs: Math.round((totalSamples / context.sampleRate) * 1000) };
   } finally {
     await context.close().catch(() => undefined);
   }
@@ -294,11 +296,19 @@ export function goertzel(samples: Float32Array, sampleRate: number, frequency: n
   return Math.max(0, power / (n * n));
 }
 
+/** Multi-frequency point evaluation for resilient acoustic room reception */
+export function bandPower(samples: Float32Array, sampleRate: number, targetFreq: number): number {
+  const p0 = goertzel(samples, sampleRate, targetFreq);
+  const p1 = goertzel(samples, sampleRate, targetFreq * 0.985);
+  const p2 = goertzel(samples, sampleRate, targetFreq * 1.015);
+  return Math.max(p0, (p1 + p2) * 0.65);
+}
+
 type ToneRecord = { time: number; bit: number | null; confidence: number; energy: number; low: number; high: number };
 
 function recoverPreambleTiming(records: ToneRecord[], approximateStart: number, nominalMs: number) {
   let best: { start: number; period: number; matches: number; score: number } | null = null;
-  for (let offset = -20; offset <= 20; offset += 0.5) {
+  for (let offset = -30; offset <= 30; offset += 1) {
     let matches = 0;
     let score = 0;
     const start = approximateStart + offset;
@@ -313,7 +323,7 @@ function recoverPreambleTiming(records: ToneRecord[], approximateStart: number, 
           nearest = rec;
         }
       }
-      if (nearest && minDiff <= nominalMs * 0.45 && nearest.bit === PREAMBLE_BITS[i]) {
+      if (nearest && minDiff <= nominalMs * 0.55 && nearest.bit === PREAMBLE_BITS[i]) {
         matches += 1;
         score += nearest.confidence;
       }
@@ -322,7 +332,7 @@ function recoverPreambleTiming(records: ToneRecord[], approximateStart: number, 
       best = { start, period: nominalMs, matches, score };
     }
   }
-  return best && best.matches >= PREAMBLE_BITS.length - 3 ? best : null;
+  return best && best.matches >= PREAMBLE_BITS.length - 5 ? best : null;
 }
 
 function decodeSamples(
@@ -334,13 +344,13 @@ function decodeSamples(
   for (let i = 0; i < PREAMBLE_BITS.length; i += 1) {
     if (bits[i] !== PREAMBLE_BITS[i]) preambleErrors += 1;
   }
-  if (preambleErrors > 3) return null;
+  if (preambleErrors > 5) return null;
 
   const syncAt = PREAMBLE_BITS.length;
   const decodedSync = bitsToWord(bits, syncAt);
-  // Allow 1 bit error in sync word
+  // Allow up to 2 bit errors in sync word
   const syncDiff = (decodedSync ^ SYNC).toString(2).split("1").length - 1;
-  if (syncDiff > 1) return null;
+  if (syncDiff > 2) return null;
 
   const lengthAt = syncAt + 16;
   const length = bitsToWord(bits, lengthAt);
@@ -373,13 +383,14 @@ export type ContinuousReceiveCallbacks = {
   onSoundStart?: () => void;
   onSoundStop?: (acousticDurationMs: number) => void;
   onMessageDecoded: (result: { message: string; crcValid: boolean }) => void;
+  onTimeout?: () => void;
   onAnalyserReady?: (analyser: AnalyserNode) => void;
 };
 
 /**
  * Continuous, auto-detecting Acoustic Receiver with Musical Chime Lock.
  * Only engages when hearing the distinct acoustic carrier tones, ignores room noise,
- * and automatically finalizes/stops when the music finishes!
+ * and automatically finalizes/stops the microphone when finished or on inactivity timeout!
  */
 export async function startContinuousReceiver(
   options: {
@@ -387,6 +398,7 @@ export async function startContinuousReceiver(
     highHz: number;
     signal: AbortSignal;
     symbolMs?: number;
+    autoTimeoutMs?: number;
   } & ContinuousReceiveCallbacks
 ): Promise<void> {
   const {
@@ -400,8 +412,10 @@ export async function startContinuousReceiver(
     onSoundStart,
     onSoundStop,
     onMessageDecoded,
+    onTimeout,
     onAnalyserReady,
     symbolMs = DEFAULT_SYMBOL_MS,
+    autoTimeoutMs = 35000,
   } = options;
 
   if (!navigator.mediaDevices?.getUserMedia) {
@@ -445,46 +459,69 @@ export async function startContinuousReceiver(
   let timingAttempted = false;
   let isSignalActive = false;
   let accumulatedBits: number[] = [];
+  const startListenTime = performance.now();
+  let isCleanedUp = false;
 
   onStatus("listening");
 
   const cleanup = () => {
+    if (isCleanedUp) return;
+    isCleanedUp = true;
     try { processorNode.disconnect(); } catch { /* ignore */ }
-    microphoneStream.getTracks().forEach((track) => track.stop());
+    try { source.disconnect(); } catch { /* ignore */ }
+    try {
+      microphoneStream.getTracks().forEach((track) => {
+        track.stop();
+        track.enabled = false;
+      });
+    } catch { /* ignore */ }
     void audioContext.close().catch(() => undefined);
   };
 
   signal.addEventListener("abort", cleanup, { once: true });
 
   processorNode.onaudioprocess = (event) => {
-    if (signal.aborted) return;
+    if (signal.aborted || isCleanedUp) return;
     const now = performance.now();
+
+    // Check for auto-timeout (silence / no activity for autoTimeoutMs)
+    if (!isSignalActive && now - startListenTime > autoTimeoutMs) {
+      cleanup();
+      onTimeout?.();
+      onStatus("idle");
+      return;
+    }
+
     const inputData = event.inputBuffer.getChannelData(0);
 
-    const low = goertzel(inputData, audioContext.sampleRate, lowHz);
-    const high = goertzel(inputData, audioContext.sampleRate, highHz);
-    const chimeLow = goertzel(inputData, audioContext.sampleRate, PREAMBLE_MELODY[0]);
-    const chimeHigh = goertzel(inputData, audioContext.sampleRate, PREAMBLE_MELODY[PREAMBLE_MELODY.length - 1]);
+    const low = bandPower(inputData, audioContext.sampleRate, lowHz);
+    const high = bandPower(inputData, audioContext.sampleRate, highHz);
+    const chimeLow = bandPower(inputData, audioContext.sampleRate, PREAMBLE_MELODY[0]);
+    const chimeHigh = bandPower(inputData, audioContext.sampleRate, PREAMBLE_MELODY[PREAMBLE_MELODY.length - 1]);
     const totalCarrierEnergy = low + high + chimeLow + chimeHigh;
 
     // Ambient room noise adaptation
     if (!isSignalActive) {
-      noiseFloor = noiseFloor * 0.95 + totalCarrierEnergy * 0.05;
+      noiseFloor = noiseFloor * 0.94 + totalCarrierEnergy * 0.06;
     }
 
-    const carrierThreshold = Math.max(0.00000008, noiseFloor * 3.5);
+    const carrierThreshold = Math.max(0.00000002, noiseFloor * 2.2);
     const strongestCarrier = Math.max(low, high);
     const carrierConfidence = (low + high) > 0 ? strongestCarrier / (low + high) : 0;
     const snrDb = noiseFloor > 0 ? 10 * Math.log10(Math.max(1, strongestCarrier / noiseFloor)) : 0;
 
     // Reject random speech and room noise: requires specific tone dominance
-    const isChimeOrCarrier = (totalCarrierEnergy > carrierThreshold * 1.5 && carrierConfidence > 0.55) || (chimeLow > carrierThreshold || chimeHigh > carrierThreshold);
-    const bit = (low + high) > carrierThreshold && carrierConfidence > 0.58 ? (high > low ? 1 : 0) : null;
+    const isChimeOrCarrier =
+      (totalCarrierEnergy > carrierThreshold * 1.3 && carrierConfidence > 0.46) ||
+      chimeLow > carrierThreshold * 1.4 ||
+      chimeHigh > carrierThreshold * 1.4;
+
+    const bit = (low + high) > carrierThreshold && carrierConfidence > 0.50 ? (high > low ? 1 : 0) : null;
 
     records.push({ time: now, bit, confidence: carrierConfidence, energy: totalCarrierEnergy, low, high });
     while (records.length && records[0].time < now - 15_000) records.shift();
 
-    const normalizedLevel = Math.min(1, Math.max(0, (totalCarrierEnergy - noiseFloor) / Math.max(noiseFloor * 8, 0.00001)));
+    const normalizedLevel = Math.min(1, Math.max(0, (totalCarrierEnergy - noiseFloor) / Math.max(noiseFloor * 6, 0.00001)));
     onLevel(normalizedLevel, snrDb);
 
     // 1. SOUND START DETECTION
@@ -517,6 +554,10 @@ export async function startContinuousReceiver(
           playChime();
           onMessageDecoded({ message: decoded.message, crcValid: decoded.crcValid });
           onStatus("success");
+          // Auto-cleanup microphone after successful reception
+          setTimeout(() => {
+            cleanup();
+          }, 1200);
         }
       }
 
@@ -579,6 +620,10 @@ export async function startContinuousReceiver(
             activeStart = null;
             timingLocked = null;
             accumulatedBits = [];
+            // Auto-cleanup microphone after successful reception
+            setTimeout(() => {
+              cleanup();
+            }, 1200);
           }
         }
       }

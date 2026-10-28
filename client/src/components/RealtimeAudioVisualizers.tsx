@@ -9,11 +9,13 @@ interface SpectrumProps {
 }
 
 export function RealtimeSpectrumCanvas({ analyser, lowHz, highHz, active, bit }: SpectrumProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
@@ -21,10 +23,30 @@ export function RealtimeSpectrumCanvas({ analyser, lowHz, highHz, active, bit }:
     const bufferLength = analyser ? analyser.frequencyBinCount : 256;
     const dataArray = new Uint8Array(bufferLength);
 
+    const updateSize = () => {
+      const rect = container.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = Math.max(260, Math.floor(rect.width));
+      const h = Math.max(64, Math.floor(rect.height || 76));
+
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+      }
+    };
+
+    updateSize();
+    const ro = new ResizeObserver(updateSize);
+    ro.observe(container);
+
     const render = () => {
       animId = requestAnimationFrame(render);
-      const width = canvas.width;
-      const height = canvas.height;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const width = canvas.width / dpr;
+      const height = canvas.height / dpr;
+
+      ctx.save();
+      ctx.scale(dpr, dpr);
 
       // Warm charcoal background (Claude style)
       ctx.fillStyle = "#181816";
@@ -33,7 +55,8 @@ export function RealtimeSpectrumCanvas({ analyser, lowHz, highHz, active, bit }:
       // Warm subtle grid lines
       ctx.strokeStyle = "rgba(255, 255, 255, 0.04)";
       ctx.lineWidth = 1;
-      for (let x = 0; x < width; x += 50) {
+      const gridStep = width < 400 ? 40 : 50;
+      for (let x = 0; x < width; x += gridStep) {
         ctx.beginPath();
         ctx.moveTo(x, 0);
         ctx.lineTo(x, height);
@@ -57,8 +80,10 @@ export function RealtimeSpectrumCanvas({ analyser, lowHz, highHz, active, bit }:
 
       const sampleRate = analyser?.context.sampleRate || 48000;
       const nyquist = sampleRate / 2;
-      const barCount = 56;
-      const barWidth = width / barCount - 2;
+      // Adaptive bar count for mobile vs desktop
+      const barCount = Math.min(56, Math.max(24, Math.floor(width / 7)));
+      const barSpacing = width < 380 ? 1.5 : 2;
+      const barWidth = Math.max(2, (width - (barCount + 1) * barSpacing) / barCount);
 
       for (let i = 0; i < barCount; i++) {
         const freq = (i / barCount) * Math.min(22000, nyquist);
@@ -66,7 +91,7 @@ export function RealtimeSpectrumCanvas({ analyser, lowHz, highHz, active, bit }:
         const value = dataArray[binIndex] || 0;
         const barHeight = Math.max(2, (value / 255) * (height - 12));
 
-        const x = i * (barWidth + 2) + 1;
+        const x = barSpacing + i * (barWidth + barSpacing);
         const y = height - barHeight;
 
         const isNearLow = Math.abs(freq - lowHz) < 320;
@@ -93,30 +118,35 @@ export function RealtimeSpectrumCanvas({ analyser, lowHz, highHz, active, bit }:
       const lowX = (lowHz / Math.min(22000, nyquist)) * width;
       const highX = (highHz / Math.min(22000, nyquist)) * width;
 
-      ctx.strokeStyle = bit === 0 && active ? "#d97757" : "rgba(217, 119, 87, 0.3)";
+      ctx.strokeStyle = bit === 0 && active ? "#d97757" : "rgba(217, 119, 87, 0.35)";
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
       ctx.moveTo(lowX, 0);
       ctx.lineTo(lowX, height);
       ctx.stroke();
 
-      ctx.strokeStyle = bit === 1 && active ? "#10b981" : "rgba(16, 185, 129, 0.3)";
+      ctx.strokeStyle = bit === 1 && active ? "#10b981" : "rgba(16, 185, 129, 0.35)";
       ctx.beginPath();
       ctx.moveTo(highX, 0);
       ctx.lineTo(highX, height);
       ctx.stroke();
       ctx.setLineDash([]);
+
+      ctx.restore();
     };
 
     render();
-    return () => cancelAnimationFrame(animId);
+    return () => {
+      cancelAnimationFrame(animId);
+      ro.disconnect();
+    };
   }, [analyser, lowHz, highHz, active, bit]);
 
   return (
-    <div className="relative w-full overflow-hidden rounded-xl border border-stone-800 bg-[#181816]">
-      <canvas ref={canvasRef} width={420} height={76} className="w-full h-[76px] block" />
-      <div className="absolute top-2 right-2.5 text-[9px] font-mono text-stone-400 bg-stone-900/80 px-2 py-0.5 rounded border border-stone-800">
-        1024-PT LIVE FFT
+    <div ref={containerRef} className="relative w-full h-[76px] sm:h-[84px] overflow-hidden rounded-xl border border-stone-800 bg-[#181816]">
+      <canvas ref={canvasRef} className="w-full h-full block" />
+      <div className="absolute top-2 right-2 text-[9px] font-mono text-stone-400 bg-stone-900/85 px-1.5 sm:px-2 py-0.5 rounded border border-stone-800 pointer-events-none">
+        1024-PT FFT
       </div>
     </div>
   );
@@ -129,11 +159,13 @@ interface OscilloscopeProps {
 }
 
 export function RealtimeOscilloscopeCanvas({ analyser, active, bit }: OscilloscopeProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
@@ -141,10 +173,30 @@ export function RealtimeOscilloscopeCanvas({ analyser, active, bit }: Oscillosco
     const bufferLength = analyser ? analyser.fftSize : 512;
     const timeArray = new Float32Array(bufferLength);
 
+    const updateSize = () => {
+      const rect = container.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = Math.max(260, Math.floor(rect.width));
+      const h = Math.max(64, Math.floor(rect.height || 76));
+
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+      }
+    };
+
+    updateSize();
+    const ro = new ResizeObserver(updateSize);
+    ro.observe(container);
+
     const render = () => {
       animId = requestAnimationFrame(render);
-      const width = canvas.width;
-      const height = canvas.height;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const width = canvas.width / dpr;
+      const height = canvas.height / dpr;
+
+      ctx.save();
+      ctx.scale(dpr, dpr);
 
       ctx.fillStyle = "#181816";
       ctx.fillRect(0, 0, width, height);
@@ -165,7 +217,7 @@ export function RealtimeOscilloscopeCanvas({ analyser, active, bit }: Oscillosco
         }
       }
 
-      ctx.lineWidth = 2;
+      ctx.lineWidth = width < 400 ? 1.75 : 2;
       ctx.strokeStyle = bit === 1 && active ? "#10b981" : "#d97757";
       ctx.shadowBlur = active ? 6 : 1;
       ctx.shadowColor = bit === 1 && active ? "#10b981" : "#d97757";
@@ -188,17 +240,21 @@ export function RealtimeOscilloscopeCanvas({ analyser, active, bit }: Oscillosco
 
       ctx.stroke();
       ctx.shadowBlur = 0;
+      ctx.restore();
     };
 
     render();
-    return () => cancelAnimationFrame(animId);
+    return () => {
+      cancelAnimationFrame(animId);
+      ro.disconnect();
+    };
   }, [analyser, active, bit]);
 
   return (
-    <div className="relative w-full overflow-hidden rounded-xl border border-stone-800 bg-[#181816]">
-      <canvas ref={canvasRef} width={640} height={76} className="w-full h-[76px] block" />
-      <div className="absolute top-2 right-2.5 text-[9px] font-mono text-stone-400 bg-stone-900/80 px-2 py-0.5 rounded border border-stone-800">
-        ACOUSTIC WAVEFORM
+    <div ref={containerRef} className="relative w-full h-[76px] sm:h-[84px] overflow-hidden rounded-xl border border-stone-800 bg-[#181816]">
+      <canvas ref={canvasRef} className="w-full h-full block" />
+      <div className="absolute top-2 right-2 text-[9px] font-mono text-stone-400 bg-stone-900/85 px-1.5 sm:px-2 py-0.5 rounded border border-stone-800 pointer-events-none">
+        WAVEFORM
       </div>
     </div>
   );

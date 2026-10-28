@@ -38,7 +38,13 @@ interface TransmissionRecord {
   status: "transmitted" | "received" | "failed";
 }
 
+interface ActiveTransmission extends TransmissionRecord {
+  expiresAt: number;
+  durationMs: number;
+}
+
 const messageHistory: TransmissionRecord[] = [];
+let activeTransmission: ActiveTransmission | null = null;
 type SyncClient = { id: string; res: express.Response };
 const syncClients: SyncClient[] = [];
 
@@ -83,8 +89,20 @@ async function startServer() {
     res.json({ messages: messageHistory.slice(-25) });
   });
 
+  app.get("/api/active-transmission", (_req, res) => {
+    const active = activeTransmission && Date.now() < activeTransmission.expiresAt ? activeTransmission : null;
+    res.json({ activeTransmission: active });
+  });
+
   app.post("/api/transmit", (req, res) => {
-    const { text, sender = "Device A", carrierLow = 1600, carrierHigh = 2200, type = "text" } = req.body;
+    const {
+      text,
+      sender = "Device A",
+      carrierLow = 1600,
+      carrierHigh = 2200,
+      type = "text",
+      durationMs = 3500,
+    } = req.body;
     if (!text || typeof text !== "string") {
       res.status(400).json({ error: "Text is required" });
       return;
@@ -101,15 +119,62 @@ async function startServer() {
       status: "transmitted",
     };
 
+    activeTransmission = {
+      ...record,
+      durationMs: Number(durationMs) || 3500,
+      expiresAt: Date.now() + Math.max(Number(durationMs) + 12000, 25000),
+    };
+
     messageHistory.push(record);
     if (messageHistory.length > 100) messageHistory.shift();
 
     broadcastToClients({
       type: "TRANSMIT_START",
       record,
+      activeTransmission,
     });
 
     res.json({ success: true, record });
+  });
+
+  // Transmitter signals that speaker finished playing audio
+  app.post("/api/transmit-end", (req, res) => {
+    const { id } = req.body;
+    broadcastToClients({
+      type: "TRANSMIT_AUDIO_ENDED",
+      id,
+      timestamp: Date.now(),
+    });
+    res.json({ success: true });
+  });
+
+  // Receiver microphone detects physical acoustic carrier signal in the room
+  app.post("/api/acoustic-signal", (req, res) => {
+    const { detectedFreq, snrDb, decodedBits } = req.body;
+    const now = Date.now();
+
+    // If we have an active or recent transmission within 25 seconds:
+    if (activeTransmission && now < activeTransmission.expiresAt) {
+      activeTransmission.status = "received";
+      const match = messageHistory.find((m) => m.id === activeTransmission?.id);
+      if (match) match.status = "received";
+
+      broadcastToClients({
+        type: "ACOUSTIC_VERIFIED",
+        id: activeTransmission.id,
+        text: activeTransmission.text,
+        sender: activeTransmission.sender,
+        detectedFreq,
+        snrDb,
+        decodedBits,
+        timestamp: now,
+      });
+
+      res.json({ success: true, verified: true, text: activeTransmission.text });
+      return;
+    }
+
+    res.json({ success: true, verified: false });
   });
 
   // Live voice streaming endpoint: as speaker talks, stream live transcription
@@ -131,6 +196,9 @@ async function startServer() {
     const match = messageHistory.find((m) => m.id === id || m.text === text);
     if (match) {
       match.status = "received";
+    }
+    if (activeTransmission && (activeTransmission.id === id || activeTransmission.text === text)) {
+      activeTransmission.status = "received";
     }
 
     broadcastToClients({
